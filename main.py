@@ -1,8 +1,10 @@
 import asyncio
+import calendar
 import json
 import os
-# env and Fast api import
-from typing import List
+import random
+import time
+from http.client import HTTPException
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from dotenv import load_dotenv
@@ -40,34 +42,34 @@ async def root():
     return {"message": "Hello World"}
 
 
-@app.get("/test")
-async def start_game():
-    return {"test": "start"}
-
-
 def kafka_serializer(value):
     return json.dumps(value).encode()
 
 
-async def produce_records(topic: str, msg: List):
+async def send_one(msg):
+    producer = AIOKafkaProducer(
+        bootstrap_servers=os.environ.get("BOOTSTRAP_SERVERS"))
+    await producer.start()
     try:
-        producer = AIOKafkaProducer(
-            bootstrap_servers=os.environ.get("BOOTSTRAP_SERVERS")
-        )
-        await producer.start()
+        # Produce message
+        current_GMT = time.gmtime()
+        time_stamp = calendar.timegm(current_GMT)
+        batch = producer.create_batch()
+        batch.append(value=kafka_serializer(msg), key=kafka_serializer(time_stamp), timestamp=None)
 
-        try:
-            await producer.send_and_wait(topic, kafka_serializer(msg))
-        finally:
-            await producer.stop()
+        await producer.send_batch(batch, os.environ.get("TOPIC_NAME"),
+                                  partition=random.choice(range(0, int(os.environ.get("TOPIC_PARTITIONS")) - 1)))
 
-    except Exception as err:
-        print(f"Some Kafka error: {err}")
+    finally:
+        # Wait for all pending messages to be delivered or expire.
+        await producer.stop()
 
 
-@app.post("/produce")
-def produce():
-    produce_records(os.environ.get("TOPIC_NAME"), ["message1", "message2"])
+# curl -X POST -H "Content-Type: application/json"  http://localhost:8002/producer/test1
+@app.post("/producer/{msg}")
+def produce(msg):
+    asyncio.run(send_one(msg))
+    return {"status": "success"}
 
 
 def encode_json(msg):
@@ -78,44 +80,45 @@ def encode_json(msg):
 loop = asyncio.get_event_loop()
 
 
-async def consume():
-    consumer = AIOKafkaConsumer(os.environ.get("TOPIC_NAME"),
-                                loop=loop,
-                                bootstrap_servers=os.environ.get("BOOTSTRAP_SERVER"))
-    try:
-        await consumer.start()
+def kafka_json_deserializer(serialized):
+    return json.loads(serialized)
 
+
+@app.get("/consumer")
+async def get_messages_from_kafka():
+    """
+    Consume a list of 'Requests' from 'TOPIC_INGESTED_REQUEST'.
+    """
+    consumer = AIOKafkaConsumer(
+        os.environ.get("TOPIC_NAME"),
+        loop=loop,
+        bootstrap_servers=os.environ.get("BOOTSTRAP_SERVERS"),
+        enable_auto_commit=True,
+        auto_commit_interval_ms=1000,  # commit every second
+        auto_offset_reset="earliest",  # If committed offset not found, start from beginning
+        value_deserializer=kafka_json_deserializer,
+    )
+
+    print(f"Start consumer on topic", os.environ.get("TOPIC_NAME"))
+    await consumer.start()
+    print("Consumer started.")
+
+    retrieved_requests = []
+    try:
+        result = await consumer.getmany(
+            timeout_ms=1000, max_records=10
+        )
+        print(f"Get messages in ", os.environ.get("TOPIC_NAME"))
+        for tp, messages in result.items():
+            if messages:
+                for message in messages:
+                    retrieved_requests.append(
+                        {"key": message.key.decode("utf-8"), "value": message.value, }
+                    )
     except Exception as e:
-        print(e)
-        return
-
-    try:
-        async for msg in consumer:
-            await encode_json(msg)
-
+        print(f"Error when trying to consume request on topic: ", os.environ.get("TOPIC_NAME"))
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         await consumer.stop()
 
-
-asyncio.create_task(consume())
-
-
-async def send_one(topic: str, msg: List):
-    try:
-        producer = AIOKafkaProducer(
-            bootstrap_servers=os.environ.get("BOOTSTRAP_SERVER")
-        )
-        await producer.start()
-
-        try:
-            await producer.send_and_wait(topic, kafka_serializer(msg))
-        finally:
-            await producer.stop()
-
-    except Exception as err:
-        print(f"Some Kafka error: {err}")
-
-
-@app.get("/start")
-async def start():
-    await send_one(topic=os.environ.get("TOPIC_NAME"), msg=["message1", "message2"])
+    return retrieved_requests
