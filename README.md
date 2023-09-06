@@ -4,10 +4,12 @@ This is a starter project for you to get hands on FAST-API integrated with Apahc
 
 As part of this project we will be launching all the resources as docker containers.
 
-1. broker: Kafka Broker
-2. zookeeper
-3. kafka-ui: For viewing the data and topic details
-4. api-demo: An Application which will help us to produce and consume Kafka Records using Fast API
+| Service         | Details       |
+| -------------        | ------------- |
+| broker|Kafka Broker|
+|zookeeper||
+|kafka-ui| For viewing the data and topic details|
+|api-demo|An Application which will help us to produce and consume Kafka Records using Fast API|
 
 
 `docker compose up --build`
